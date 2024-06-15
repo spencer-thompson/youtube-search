@@ -2,7 +2,10 @@ module github.com/spencer-thompson/youtube-search
 
 go 1.22.4
 
-require google.golang.org/api v0.183.0
+require (
+	github.com/dustin/go-humanize v1.0.1
+	google.golang.org/api v0.183.0
+)
 
 require (
 	cloud.google.com/go/auth v0.5.1 // indirect

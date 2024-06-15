@@ -1,18 +1,37 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"time"
 	"unicode/utf8"
 
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
+
+	"github.com/dustin/go-humanize"
 )
 
 func main() {
-	query := "python"
+	// query := ""
+	scanner := bufio.NewScanner(os.Stdin)
+
+	// for scanner.Scan() {
+	// 	line := scanner.Text()
+	// 	if line == "" {
+	// 		break
+	// 	}
+	// 	query = query + line
+	// }
+	scanner.Scan()
+	query := scanner.Text()
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error reading stdin:", err)
+	}
 
 	youtubeApiKey := os.Getenv("YOUTUBE_DATA_API_KEY")
 
@@ -39,7 +58,15 @@ func main() {
 	playlists := make(map[string]string)
 	videos := make(map[string]youtube.Video)
 
-	longestChannelTitle := 0
+	// longestTitle := 0
+	// longestChannelTitle := 0
+
+	titleLengths := map[string]int{
+		"Title":   0,
+		"Channel": 0,
+		"Date":    0,
+		"Views":   0,
+	}
 
 	for _, item := range response.Items {
 		videoResponse, err := service.Videos.List([]string{"snippet,statistics"}).Id(item.Id.VideoId).Do()
@@ -48,10 +75,18 @@ func main() {
 		}
 		video := videoResponse.Items[0]
 		// fmt.Printf("Title: %v | View Count: %v | Date: %v | Channel: %v\n", video.Snippet.Title, video.Statistics.ViewCount, video.Snippet.PublishedAt, video.Snippet.ChannelTitle)
-		fmt.Printf("%-12v | %v | Date: %d | Channel: %v\n", video.Snippet.ChannelTitle, video.Snippet.Title, video.Statistics.ViewCount, video.Snippet.PublishedAt)
+		// fmt.Printf("%-12v | %v | Date: %d | Channel: %v\n", video.Snippet.ChannelTitle, video.Snippet.Title, video.Statistics.ViewCount, video.Snippet.PublishedAt)
 
-		if utf8.RuneCountInString(video.Snippet.ChannelTitle) > longestChannelTitle {
-			longestChannelTitle = utf8.RuneCountInString(video.Snippet.ChannelTitle)
+		if utf8.RuneCountInString(video.Snippet.Title) > titleLengths["Title"] {
+			titleLengths["Title"] = utf8.RuneCountInString(video.Snippet.Title)
+		}
+
+		if utf8.RuneCountInString(video.Snippet.ChannelTitle) > titleLengths["Channel"] {
+			titleLengths["Channel"] = utf8.RuneCountInString(video.Snippet.ChannelTitle)
+		}
+
+		if utf8.RuneCountInString(video.Snippet.PublishedAt) > titleLengths["Date"] {
+			titleLengths["Date"] = utf8.RuneCountInString(video.Snippet.PublishedAt)
 		}
 
 		switch item.Id.Kind {
@@ -68,20 +103,38 @@ func main() {
 	// printIDs("Videos", videos)
 	// printIDs("Channels", channels)
 	// printIDs("Playlists", playlists)
-	printVideos(videos, longestChannelTitle)
+	printVideos(videos, titleLengths)
 }
 
 func sortVideos() {
 }
 
-func printVideo(title string, channel string) {
-	utf8.RuneCountInString(channel)
-	fmt.Printf(title)
+func formatTime(dateStr string) string {
+	date, err := time.Parse(time.RFC3339, dateStr)
+	if err != nil {
+		fmt.Println("Error parsing date:", err)
+	}
+
+	layout := "1.2.2006"
+
+	return date.Format(layout)
 }
 
-func printVideos(videos map[string]youtube.Video, length int) {
-	for _, vid := range videos {
-		fmt.Printf("%-*v | %v\n", length, vid.Snippet.ChannelTitle, vid.Snippet.Title)
+func printVideos(videos map[string]youtube.Video, length map[string]int) {
+	for id, vid := range videos {
+
+		videoUrl := fmt.Sprintf("https://www.youtube.com/watch?v=%s", id)
+		fmt.Printf(
+			"%v | %-*v | %-*v | %*v | %8v\n",
+			videoUrl,
+			length["Title"],
+			vid.Snippet.Title,
+			length["Channel"],
+			vid.Snippet.ChannelTitle,
+			10,
+			formatTime(vid.Snippet.PublishedAt),
+			humanize.SIWithDigits(float64(vid.Statistics.ViewCount), 2, ""),
+		)
 	}
 }
 
