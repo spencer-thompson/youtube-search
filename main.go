@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,9 +17,40 @@ import (
 	"github.com/dustin/go-humanize"
 )
 
+func getVideoInfo(s *youtube.Service, id string, vids *map[string]youtube.Video, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	resp, err := s.Videos.List([]string{"snippet,statistics"}).Id(id).Do()
+	if err != nil {
+		log.Fatalf("Error Getting Video Info: %v", err)
+		return
+	}
+	if len(resp.Items) < 1 {
+		return
+	} else {
+		(*vids)[id] = *resp.Items[0]
+	}
+}
+
 func main() {
+	var query string
+	var numResults int
+	flag.StringVar(&query, "s", "neovim", "search query")
+	flag.IntVar(&numResults, "n", 10, "total number of results to return")
+	flag.Parse()
+
+	// Handle flags/command line args or stdin
 	// query := ""
-	scanner := bufio.NewScanner(os.Stdin)
+	if len(flag.Args()) > 0 {
+		query = flag.Arg(0)
+	} else {
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		query = scanner.Text()
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading stdin:", err)
+		}
+	}
 
 	// for scanner.Scan() {
 	// 	line := scanner.Text()
@@ -26,12 +59,6 @@ func main() {
 	// 	}
 	// 	query = query + line
 	// }
-	scanner.Scan()
-	query := scanner.Text()
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error reading stdin:", err)
-	}
 
 	youtubeApiKey := os.Getenv("YOUTUBE_DATA_API_KEY")
 
@@ -47,63 +74,43 @@ func main() {
 		log.Fatalf("Error creating new YouTube client: %v", err)
 	}
 
-	call := service.Search.List([]string{"id"}).Q(query).MaxResults(5).Order("viewCount") //.Q(*query).MaxResults(25)
-	response, err := call.Do()
+	response, err := service.Search.List([]string{"id"}).Q(query).MaxResults(int64(numResults)).Order("viewCount").Do()
 	if err != nil {
-		log.Fatalf("Error calling Youtube API: %v", err)
+		log.Fatalf("Error Searching Youtube: %v", err)
 	}
 
 	// videos := make(map[string]string)
-	channels := make(map[string]string)
-	playlists := make(map[string]string)
 	videos := make(map[string]youtube.Video)
 
 	// longestTitle := 0
 	// longestChannelTitle := 0
+	var wg sync.WaitGroup
 
-	titleLengths := map[string]int{
-		"Title":   0,
-		"Channel": 0,
-		"Date":    0,
-		"Views":   0,
-	}
-
+	// fmt.Println("test")
 	for _, item := range response.Items {
-		videoResponse, err := service.Videos.List([]string{"snippet,statistics"}).Id(item.Id.VideoId).Do()
-		if err != nil {
-			log.Fatalf("Error calling Youtube API: %v", err)
-		}
-		video := videoResponse.Items[0]
-		// fmt.Printf("Title: %v | View Count: %v | Date: %v | Channel: %v\n", video.Snippet.Title, video.Statistics.ViewCount, video.Snippet.PublishedAt, video.Snippet.ChannelTitle)
-		// fmt.Printf("%-12v | %v | Date: %d | Channel: %v\n", video.Snippet.ChannelTitle, video.Snippet.Title, video.Statistics.ViewCount, video.Snippet.PublishedAt)
 
-		if utf8.RuneCountInString(video.Snippet.Title) > titleLengths["Title"] {
-			titleLengths["Title"] = utf8.RuneCountInString(video.Snippet.Title)
-		}
+		wg.Add(1)
+		go getVideoInfo(service, item.Id.VideoId, &videos, &wg)
 
-		if utf8.RuneCountInString(video.Snippet.ChannelTitle) > titleLengths["Channel"] {
-			titleLengths["Channel"] = utf8.RuneCountInString(video.Snippet.ChannelTitle)
-		}
-
-		if utf8.RuneCountInString(video.Snippet.PublishedAt) > titleLengths["Date"] {
-			titleLengths["Date"] = utf8.RuneCountInString(video.Snippet.PublishedAt)
-		}
-
-		switch item.Id.Kind {
-		case "youtube#video":
-			videos[item.Id.VideoId] = *video
-			// fmt.Println(item.Snippet.MarshalJSON())
-		case "youtube#channel":
-			channels[item.Id.ChannelId] = video.Snippet.Title
-		case "youtube#playlist":
-			playlists[item.Id.PlaylistId] = video.Snippet.Title
-		}
+		// videoResponse, err := service.Videos.List([]string{"snippet,statistics"}).Id(item.Id.VideoId).Do()
+		// if err != nil {
+		// 	log.Fatalf("Error calling Youtube API: %v", err)
+		// }
+		// video := videoResponse.Items[0]
+		//
+		// switch item.Id.Kind {
+		// case "youtube#video":
+		// 	videos[item.Id.VideoId] = *video
+		// 	// fmt.Println(item.Snippet.MarshalJSON())
+		// case "youtube#channel":
+		// 	channels[item.Id.ChannelId] = video.Snippet.Title
+		// case "youtube#playlist":
+		// 	playlists[item.Id.PlaylistId] = video.Snippet.Title
+		// }
 	}
 
-	// printIDs("Videos", videos)
-	// printIDs("Channels", channels)
-	// printIDs("Playlists", playlists)
-	printVideos(videos, titleLengths)
+	wg.Wait()
+	printVideos(videos)
 }
 
 func sortVideos() {
@@ -115,37 +122,53 @@ func formatTime(dateStr string) string {
 		fmt.Println("Error parsing date:", err)
 	}
 
-	layout := "1.2.2006"
+	layout := "1.02.2006"
 
 	return date.Format(layout)
 }
 
-func printVideos(videos map[string]youtube.Video, length map[string]int) {
-	for id, vid := range videos {
+func truncate(s string, max int) string {
+	if max > utf8.RuneCountInString(s) {
+		return s
+	}
+	return fmt.Sprintf("%v...", s[:(max-3)])
+}
 
-		videoUrl := fmt.Sprintf("https://www.youtube.com/watch?v=%s", id)
+func printVideos(videos map[string]youtube.Video) {
+	length := map[string]int{
+		"Title":        0,
+		"Channel":      0,
+		"titleLimit":   50,
+		"channelLimit": 20,
+	}
+
+	for _, vid := range videos {
+		// find longest of each
+		if utf8.RuneCountInString(vid.Snippet.Title) > length["titleLimit"] {
+			length["Title"] = length["titleLimit"]
+		} else if utf8.RuneCountInString(vid.Snippet.Title) > length["Title"] {
+			length["Title"] = utf8.RuneCountInString(vid.Snippet.Title)
+		}
+		if utf8.RuneCountInString(vid.Snippet.ChannelTitle) > length["channelLimit"] {
+			length["Channel"] = length["channelLimit"]
+		} else if utf8.RuneCountInString(vid.Snippet.ChannelTitle) > length["Channel"] {
+			length["Channel"] = utf8.RuneCountInString(vid.Snippet.ChannelTitle)
+		}
+	}
+
+	for id, vid := range videos {
+		// videoUrl := fmt.Sprintf("https://www.youtube.com/watch?v=%s", id)
 		fmt.Printf(
-			"%v | %-*v | %-*v | %*v | %8v\n",
-			videoUrl,
+			"%-*v | %-*v | %*v | %8v | %v\n",
 			length["Title"],
-			vid.Snippet.Title,
+			truncate(vid.Snippet.Title, length["Title"]),
 			length["Channel"],
-			vid.Snippet.ChannelTitle,
+			truncate(vid.Snippet.ChannelTitle, length["Channel"]),
 			10,
 			formatTime(vid.Snippet.PublishedAt),
 			humanize.SIWithDigits(float64(vid.Statistics.ViewCount), 2, ""),
+			// videoUrl,
+			id,
 		)
 	}
-}
-
-// Print the ID and title of each result in a list as well as a name that
-// identifies the list. For example, print the word section name "Videos"
-// above a list of video search results, followed by the video ID and title
-// of each matching video.
-func printIDs(sectionName string, matches map[string]string) {
-	fmt.Printf("%v:\n", sectionName)
-	for id, title := range matches {
-		fmt.Printf("[%v] %v\n", id, title)
-	}
-	fmt.Printf("\n\n")
 }
